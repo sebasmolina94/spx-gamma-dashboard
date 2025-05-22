@@ -1,0 +1,474 @@
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.gridspec import GridSpec
+import seaborn as sns
+from scipy import stats
+import warnings
+import mplfinance as mpf
+
+warnings.filterwarnings('ignore')
+sns.set_style('darkgrid')
+
+class FractalAnalysis:
+    """A class for analyzing fractal properties of financial time series."""
+    
+    def __init__(self):
+        """Initialize the FractalAnalysis class."""
+        self.daily_data = None
+        self.weekly_data = None
+        self.monthly_data = None
+        self.timeframes = {}
+        
+    def download_data(self, ticker, period='60d', interval='30m'):
+        """
+        Download financial data for a specific period and interval.
+        
+        Parameters:
+        -----------
+        ticker : str
+            The ticker symbol
+        period : str
+            The time period to download (default: '60d')
+        interval : str
+            The data interval (default: '30m')
+        """
+        # Adjust period for intraday intervals
+        if interval in ['1m', '2m', '5m', '15m', '30m', '60m', '90m']:
+            period = '60d'  # Yahoo Finance limits intraday data to the last 60 days
+        
+        print(f"Downloading {ticker} data for {period} with {interval} intervals...")
+        
+        # Download intraday data
+        self.daily_data = yf.download(ticker, period=period, interval=interval)
+        
+        # Flatten MultiIndex columns if present and select numeric columns
+        if isinstance(self.daily_data.columns, pd.MultiIndex):
+            self.daily_data.columns = [col[0] for col in self.daily_data.columns]  # Extract the first level of the MultiIndex
+        
+        # Ensure only numeric columns are kept
+        numeric_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        self.daily_data = self.daily_data[numeric_columns]
+        
+        print("Download complete.")
+        return self.daily_data
+    
+    def calculate_returns(self, data=None):
+        """
+        Calculate log returns from price data.
+        
+        Parameters:
+        -----------
+        data : DataFrame, optional
+            Price data. If None, daily data will be used.
+            
+        Returns:
+        --------
+        returns : Series
+            Log returns series
+        """
+        if data is None:
+            data = self.daily_data
+        
+        returns = np.log(data['Close'] / data['Close'].shift(1)).dropna()
+        return returns
+    
+    def calculate_hurst_exponent(self, time_series, max_lag=100):
+        """
+        Calculate the Hurst exponent of a time series.
+        
+        Parameters:
+        -----------
+        time_series : array-like
+            The time series to analyze
+        max_lag : int
+            Maximum lag to use in calculation
+            
+        Returns:
+        --------
+        hurst_exponent : float
+            The Hurst exponent value
+        """
+        # Ensure time_series is numpy array
+        time_series = np.array(time_series)
+        
+        # Create array of lag values
+        lags = range(2, min(max_lag, len(time_series) // 4))
+        
+        # Calculate R/S values for each lag
+        rs_values = []
+        
+        for lag in lags:
+            # Calculate R/S
+            ts_chunks = [time_series[i:i+lag] for i in range(0, len(time_series) - lag + 1, lag)]
+            rs_values_lag = []
+            
+            for chunk in ts_chunks:
+                if len(chunk) < 2:  # Need at least 2 points
+                    continue
+                
+                # Calculate range and standard deviation
+                mean_chunk = np.mean(chunk)
+                deviation = chunk - mean_chunk
+                cumulative_deviation = np.cumsum(deviation)
+                
+                # Range (max - min of cumulative deviation)
+                r = np.max(cumulative_deviation) - np.min(cumulative_deviation)
+                
+                # Standard deviation
+                s = np.std(chunk)
+                
+                if s == 0:  # Avoid division by zero
+                    continue
+                
+                rs_values_lag.append(r / s)
+            
+            if rs_values_lag:
+                rs_values.append(np.mean(rs_values_lag))
+        
+        if len(rs_values) < 2 or len(lags) < 2:
+            return 0.5  # Default to random walk
+        
+        # Linear regression on log-log plot
+        log_lags = np.log10(lags[:len(rs_values)])
+        log_rs = np.log10(rs_values)
+        
+        # Fit line: log(R/S) = H * log(lag) + c
+        slope, _, _, _, _ = stats.linregress(log_lags, log_rs)
+        
+        return slope
+    
+    def calculate_rolling_hurst(self, returns, window=100):
+        """
+        Calculate rolling Hurst exponent over a window.
+        
+        Parameters:
+        -----------
+        returns : Series
+            Return series to analyze
+        window : int
+            Window size for rolling calculation
+            
+        Returns:
+        --------
+        rolling_hurst : Series
+            Series of rolling Hurst exponent values
+        """
+        rolling_hurst = []
+        
+        for i in range(window, len(returns) + 1):
+            hurst = self.calculate_hurst_exponent(returns[i-window:i])
+            rolling_hurst.append(hurst)
+        
+        return pd.Series(rolling_hurst, index=returns.index[window-1:])
+    
+    def calculate_volatility_ratio(self, higher_tf, lower_tf, vol_window=20):
+        """
+        Calculate volatility ratio between two timeframes.
+        
+        Parameters:
+        -----------
+        higher_tf : DataFrame
+            Higher timeframe price data
+        lower_tf : DataFrame
+            Lower timeframe price data
+        vol_window : int
+            Window for volatility calculation
+            
+        Returns:
+        --------
+        vol_ratio : Series
+            Volatility ratio series
+        """
+        # Calculate volatility for each timeframe
+        higher_vol = higher_tf['Close'].pct_change().rolling(vol_window).std()
+        lower_vol = lower_tf['Close'].pct_change().rolling(vol_window).std()
+        
+        # Resample lower timeframe volatility to match higher timeframe
+        if higher_tf.index.freq != lower_tf.index.freq:
+            # Find matching dates
+            common_dates = sorted(set(higher_tf.index) & set(lower_tf.index))
+            higher_vol = higher_vol.loc[common_dates]
+            lower_vol = lower_vol.loc[common_dates]
+        
+        # Calculate ratio (avoiding division by zero)
+        vol_ratio = pd.Series(index=higher_vol.index)
+        
+        for date in higher_vol.index:
+            if date in lower_vol.index:
+                if higher_vol[date] > 0:
+                    vol_ratio[date] = lower_vol[date] / higher_vol[date]
+                else:
+                    vol_ratio[date] = np.nan
+        
+        return vol_ratio.dropna()
+    
+    def fractal_dimension(self, time_series, window=20):
+        """
+        Calculate fractal dimension of time series using variation method.
+        
+        Parameters:
+        -----------
+        time_series : array-like
+            Time series to analyze
+        window : int
+            Window size for calculation
+            
+        Returns:
+        --------
+        fd : float
+            Fractal dimension estimate
+        """
+        # Convert to numpy array if needed
+        if not isinstance(time_series, np.ndarray):
+            time_series = np.array(time_series)
+        
+        # Normalize to [0,1] range
+        ts_norm = (time_series - np.min(time_series)) / (np.max(time_series) - np.min(time_series))
+        
+        # Calculate length of curve in k-sized segments
+        lengths = []
+        for k in range(2, min(window, len(ts_norm) // 4)):
+            # Split series into segments of size k
+            steps = len(ts_norm) // k
+            length = 0
+            
+            for i in range(steps):
+                segment = ts_norm[i*k:(i+1)*k]
+                # Calculate Euclidean distance
+                dx = 1/k
+                dy = np.max(segment) - np.min(segment)
+                length += np.sqrt(dx**2 + dy**2)
+            
+            lengths.append(length)
+        
+        # Calculate fractal dimension using regression
+        k_values = range(2, 2 + len(lengths))
+        log_k = np.log(k_values)
+        log_lengths = np.log(lengths)
+        
+        # Fit line: log(length) = (1 - D) * log(k) + c
+        if len(log_k) > 1 and len(log_lengths) > 1:
+            slope, _, _, _, _ = stats.linregress(log_k, log_lengths)
+            fd = 2 + slope  # 2 - slope for time series
+        else:
+            fd = 1.5  # Default value
+            
+        return fd
+    
+    def visualize_fractal_analysis(self, ticker, figsize=(14, 8)):
+        """
+        Create a candlestick chart with key trading levels (support, resistance, midpoint, full range).
+        
+        Parameters:
+        -----------
+        ticker : str
+            Ticker symbol
+        figsize : tuple
+            Figure size (width, height)
+            
+        Returns:
+        --------
+        None
+        """
+        # Check if data is available
+        if self.daily_data.empty:
+            raise ValueError("Daily data is empty. Cannot create visualizations.")
+        
+        # Dynamically adjust the rolling window size
+        rolling_window = min(50, len(self.daily_data))
+        if rolling_window < 2:
+            raise ValueError("Not enough data to calculate rolling levels. At least 2 rows are required.")
+        
+        # Drop missing values
+        self.daily_data = self.daily_data.dropna()
+        
+        # Calculate key trading levels
+        support_level = self.daily_data['Low'].rolling(window=rolling_window, min_periods=1).min().iloc[-1]
+        resistance_level = self.daily_data['High'].rolling(window=rolling_window, min_periods=1).max().iloc[-1]
+        midpoint_level = (support_level + resistance_level) / 2
+
+        # Calculate full range support and resistance
+        absolute_support = self.daily_data['Low'].min()  # Lowest low in the dataset
+        absolute_resistance = self.daily_data['High'].max()  # Highest high in the dataset
+        
+        # Prepare data for mplfinance
+        ohlc_data = self.daily_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+        
+        # Add key trading levels as horizontal lines
+        add_lines = [
+            mpf.make_addplot([support_level] * len(ohlc_data), color='green', linestyle='--', width=1.5, label=f'Support: {support_level:.2f}'),
+            mpf.make_addplot([resistance_level] * len(ohlc_data), color='red', linestyle='--', width=1.5, label=f'Resistance: {resistance_level:.2f}'),
+            mpf.make_addplot([midpoint_level] * len(ohlc_data), color='orange', linestyle='--', width=1.5, label=f'Midpoint: {midpoint_level:.2f}'),
+            mpf.make_addplot([absolute_support] * len(ohlc_data), color='blue', linestyle='-', width=1.5, label=f'Absolute Support: {absolute_support:.2f}'),
+            mpf.make_addplot([absolute_resistance] * len(ohlc_data), color='purple', linestyle='-', width=1.5, label=f'Absolute Resistance: {absolute_resistance:.2f}')
+        ]
+        
+        # Plot candlestick chart with mplfinance
+        mpf.plot(
+            ohlc_data,
+            type='candle',
+            style='yahoo',
+            title=f'{ticker} Candlestick Chart (30-Minute Intervals, Last 60 Days)',
+            ylabel='Price',
+            addplot=add_lines,
+            figsize=figsize,
+            volume=True
+        )
+    
+    def visualize_self_similarity(self, timeframes=['Daily', 'Weekly', 'Monthly'], figsize=(12, 10)):
+        """
+        Visualize self-similarity across timeframes.
+        
+        Parameters:
+        -----------
+        timeframes : list
+            List of timeframes to analyze
+        figsize : tuple
+            Figure size (width, height)
+            
+        Returns:
+        --------
+        fig : Figure
+            Matplotlib figure object
+        """
+        fig, axes = plt.subplots(2, 2, figsize=figsize)
+        axes = axes.flatten()
+        
+        # Prepare data for all timeframes
+        tf_returns = {}
+        tf_volatilities = {}
+        
+        for tf in timeframes:
+            if tf in self.timeframes:
+                # Calculate returns
+                tf_returns[tf] = np.log(self.timeframes[tf]['Close'] / 
+                                      self.timeframes[tf]['Close'].shift(1)).dropna()
+                
+                # Calculate volatility for different windows
+                vol_windows = [5, 10, 20, 30]
+                if tf == 'Daily':
+                    vol_windows = [5, 10, 20, 30, 50, 100]
+                elif tf == 'Weekly':
+                    vol_windows = [4, 8, 12, 16, 26]
+                elif tf == 'Monthly':
+                    vol_windows = [3, 6, 9, 12]
+                
+                tf_volatilities[tf] = {window: tf_returns[tf].rolling(window).std().dropna() 
+                                     for window in vol_windows}
+        
+        # Plot 1: Return distributions for different timeframes
+        ax1 = axes[0]
+        for tf in tf_returns:
+            sns.kdeplot(tf_returns[tf], ax=ax1, label=tf)
+        
+        ax1.set_title('Return Distributions Across Timeframes', fontsize=12)
+        ax1.set_xlabel('Log Returns', fontsize=10)
+        ax1.set_ylabel('Density', fontsize=10)
+        ax1.legend()
+        
+        # Plot 2: Log-log plot of volatility vs. time window
+        ax2 = axes[1]
+        markers = ['o', 's', '^', 'D']
+        colors = ['blue', 'green', 'red', 'purple']
+        
+        for i, tf in enumerate(tf_volatilities):
+            windows = list(tf_volatilities[tf].keys())
+            avg_vols = [tf_volatilities[tf][w].mean() for w in windows]
+            
+            # Plot log-log relationship
+            ax2.loglog(windows, avg_vols, marker=markers[i % len(markers)], 
+                     color=colors[i % len(colors)], label=tf)
+        
+        ax2.set_title('Volatility Scaling Across Timeframes', fontsize=12)
+        ax2.set_xlabel('Time Window (log scale)', fontsize=10)
+        ax2.set_ylabel('Average Volatility (log scale)', fontsize=10)
+        ax2.legend()
+        
+        # Plot 3: Hurst exponents for different timeframes
+        ax3 = axes[2]
+        hurst_values = {}
+        
+        for tf in tf_returns:
+            if len(tf_returns[tf]) > 100:
+                # Calculate Hurst over different windows
+                windows = [100, 200, 300, 400, 500]
+                if tf == 'Weekly':
+                    windows = [52, 104, 156]
+                if tf == 'Monthly':
+                    windows = [24, 36, 48, 60]
+                
+                windows = [w for w in windows if w < len(tf_returns[tf])]
+                
+                if windows:
+                    hurst_values[tf] = [self.calculate_hurst_exponent(tf_returns[tf].values, max_lag=w) 
+                                      for w in windows]
+                    ax3.plot(windows, hurst_values[tf], marker=markers[list(tf_returns.keys()).index(tf) % len(markers)], 
+                           color=colors[list(tf_returns.keys()).index(tf) % len(colors)], label=tf)
+        
+        ax3.set_title('Hurst Exponent for Different Time Windows', fontsize=12)
+        ax3.set_xlabel('Window Size', fontsize=10)
+        ax3.set_ylabel('Hurst Exponent', fontsize=10)
+        ax3.axhline(y=0.5, color='black', linestyle='--', alpha=0.7)
+        ax3.legend()
+        
+        # Plot 4: Autocorrelation across timeframes
+        ax4 = axes[3]
+        lags = 20
+        
+        for tf in tf_returns:
+            if len(tf_returns[tf]) > lags:
+                acf = [1]  # Lag 0 autocorrelation is always 1
+                for lag in range(1, lags + 1):
+                    if lag < len(tf_returns[tf]):
+                        acf.append(np.corrcoef(tf_returns[tf][lag:], tf_returns[tf][:-lag])[0, 1])
+                
+                ax4.plot(range(len(acf)), acf, 
+                       marker=markers[list(tf_returns.keys()).index(tf) % len(markers)], 
+                       color=colors[list(tf_returns.keys()).index(tf) % len(colors)], 
+                       label=tf)
+        
+        ax4.set_title('Return Autocorrelation', fontsize=12)
+        ax4.set_xlabel('Lag', fontsize=10)
+        ax4.set_ylabel('Autocorrelation', fontsize=10)
+        ax4.axhline(y=0, color='black', linestyle='--', alpha=0.7)
+        ax4.legend()
+        
+        plt.tight_layout()
+        return fig
+
+
+def analyze_ticker(ticker, period='180d', interval='30m'):
+    """Run a full fractal analysis on a ticker."""
+    try:
+        # Create analyzer and download data
+        analyzer = FractalAnalysis()
+        analyzer.download_data(ticker, period=period, interval=interval)
+        
+        # Drop missing data
+        analyzer.daily_data = analyzer.daily_data.dropna()
+        
+        # Create visualizations
+        analyzer.visualize_fractal_analysis(ticker)
+        
+        plt.show()
+        
+        return analyzer
+        
+    except Exception as e:
+        print(f"Error analyzing {ticker}: {e}")
+        return None
+
+
+# Example usage
+if __name__ == "__main__":
+    # Example: analyze a stock or ETF
+    ticker = "SPY"  # S&P 500 ETF
+    analyze_ticker(ticker)
+    
+    # For comparing multiple assets with different fractal properties:
+    # tickers = ["SPY", "GLD", "TLT", "VIX"]
+    # for ticker in tickers:
+    #     analyze_ticker(ticker)

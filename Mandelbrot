@@ -1,0 +1,344 @@
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from datetime import datetime, timedelta
+
+class MandelbrotFractalLevels:
+    def __init__(self, ticker, period="1y", interval="1d", max_iterations=100, escape_threshold=2.0):
+        """
+        Initialize the fractal analysis with the specified parameters.
+        
+        Args:
+            ticker (str): The stock ticker symbol
+            period (str): Time period to download (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
+            interval (str): Data interval (1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo)
+            max_iterations (int): Maximum iterations for the Mandelbrot calculations
+            escape_threshold (float): Threshold for determining if a point escapes to infinity
+        """
+        self.ticker = ticker
+        self.period = period
+        self.interval = interval
+        self.max_iterations = max_iterations
+        self.escape_threshold = escape_threshold
+        self.data = None
+        self.key_levels = None
+        
+    def fetch_data(self):
+        """Download historical data using yfinance"""
+        print(f"Fetching data for {self.ticker}...")
+        self.data = yf.download(self.ticker, period=self.period, interval=self.interval)
+        
+        # Flatten MultiIndex columns if present
+        if isinstance(self.data.columns, pd.MultiIndex):
+            self.data.columns = [col[0] for col in self.data.columns]
+        
+        print(f"Downloaded {len(self.data)} rows of data")
+        return self.data
+    
+    def normalize_prices(self):
+        """Normalize prices to [0, 1] range for fractal calculations"""
+        price_min = self.data['Low'].min()
+        price_max = self.data['High'].max()
+        price_range = price_max - price_min
+        
+        self.data['NormalizedClose'] = (self.data['Close'] - price_min) / price_range
+        self.data['NormalizedHigh'] = (self.data['High'] - price_min) / price_range
+        self.data['NormalizedLow'] = (self.data['Low'] - price_min) / price_range
+        
+    def mandelbrot_iteration(self, c_real, c_imag):
+        """
+        Calculate the escape iteration for a given complex number c
+        using the Mandelbrot set formula: z = z^2 + c
+        
+        Returns the iteration count when |z| > threshold or max_iterations
+        """
+        z_real, z_imag = 0, 0
+        
+        for i in range(self.max_iterations):
+            # Calculate z^2
+            z_real_temp = z_real * z_real - z_imag * z_imag
+            z_imag = 2 * z_real * z_imag
+            z_real = z_real_temp
+            
+            # Add c
+            z_real += c_real
+            z_imag += c_imag
+            
+            # Check if the point escapes
+            if (z_real * z_real + z_imag * z_imag) > self.escape_threshold:
+                return i
+                
+        # The point is likely in the set
+        return self.max_iterations
+    
+    def calculate_fractal_dimension(self):
+        """Calculate the fractal dimension for each price point"""
+        print("Calculating fractal dimensions...")
+        
+        # Ensure the data is normalized
+        if 'NormalizedClose' not in self.data.columns:
+            self.normalize_prices()
+        
+        # Map price to complex plane coordinates
+        fractal_dimensions = []
+        
+        for idx, row in self.data.iterrows():
+            # Ensure row values are scalars
+            normalized_close = float(row['NormalizedClose'])
+            
+            # Map normalized price to the complex plane
+            c_real = 0.4 * normalized_close - 0.2
+            c_imag = 0.3 * normalized_close - 0.15
+            
+            # Calculate iteration count for this point
+            iterations = self.mandelbrot_iteration(c_real, c_imag)
+            
+            # Normalize to [0, 1]
+            fractal_dim = iterations / self.max_iterations
+            fractal_dimensions.append(fractal_dim)
+        
+        self.data['FractalDimension'] = fractal_dimensions
+        
+    def detect_key_levels(self, window=5, threshold_multiplier=1.5):
+        """
+        Detect key levels based on significant changes in fractal dimension
+        
+        Args:
+            window (int): Window size for calculating average changes
+            threshold_multiplier (float): Multiplier for the average to detect significant changes
+        """
+        print("Detecting key levels...")
+        
+        # Calculate change in fractal dimension
+        self.data['FractalChange'] = self.data['FractalDimension'].diff().abs()
+        
+        # Calculate moving average of changes
+        self.data['AvgFractalChange'] = self.data['FractalChange'].rolling(window=window).mean()
+        
+        # Identify significant changes (potential key levels)
+        self.data['IsKeyLevel'] = (
+            self.data['FractalChange'] > 
+            self.data['AvgFractalChange'] * threshold_multiplier
+        )
+        
+        # Calculate strength of the level
+        self.data.loc[self.data['IsKeyLevel'], 'LevelStrength'] = (
+            self.data.loc[self.data['IsKeyLevel'], 'FractalChange'] / 
+            self.data.loc[self.data['IsKeyLevel'], 'AvgFractalChange']
+        )
+        
+        # Extract key levels
+        key_levels = self.data[self.data['IsKeyLevel']][['Close', 'LevelStrength']]
+        
+        # Cleanup and return unique levels within certain proximity
+        self.key_levels = self.cluster_close_levels(key_levels)
+        return self.key_levels
+    
+    def cluster_close_levels(self, key_levels, proximity_pct=0.5):
+        """
+        Group key levels that are very close to each other
+        
+        Args:
+            key_levels (DataFrame): DataFrame with Close prices and LevelStrength
+            proximity_pct (float): Percentage proximity to consider levels as the same
+        
+        Returns:
+            DataFrame with consolidated key levels
+        """
+        if len(key_levels) == 0:
+            return pd.DataFrame(columns=['Price', 'Strength'])
+            
+        # Sort levels by price
+        sorted_levels = key_levels.sort_values('Close')
+        
+        # Initialize clusters
+        clusters = []
+        current_cluster = [sorted_levels.iloc[0]]
+        current_price = sorted_levels.iloc[0]['Close']
+        
+        # Cluster close levels
+        for i in range(1, len(sorted_levels)):
+            level = sorted_levels.iloc[i]
+            if (level['Close'] - current_price) / current_price * 100 < proximity_pct:
+                # Add to current cluster
+                current_cluster.append(level)
+            else:
+                # Create new cluster
+                clusters.append(current_cluster)
+                current_cluster = [level]
+                current_price = level['Close']
+                
+        # Add last cluster
+        if current_cluster:
+            clusters.append(current_cluster)
+            
+        # Calculate average price and total strength for each cluster
+        consolidated_levels = []
+        for cluster in clusters:
+            cluster_df = pd.DataFrame(cluster)
+            avg_price = cluster_df['Close'].mean()
+            total_strength = cluster_df['LevelStrength'].sum()
+            consolidated_levels.append({
+                'Price': avg_price,
+                'Strength': total_strength
+            })
+            
+        return pd.DataFrame(consolidated_levels)
+    
+    def analyze(self):
+        """Run the complete analysis pipeline"""
+        self.fetch_data()
+        self.normalize_prices()
+        self.calculate_fractal_dimension()
+        key_levels = self.detect_key_levels()
+        return key_levels
+    
+    def plot_results(self, show_key_levels=True):
+        """Plot the results with key levels"""
+        if self.data is None:
+            print("No data available. Please run analyze() first.")
+            return
+            
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+        
+        # Plot price chart
+        ax1.plot(self.data.index, self.data['Close'], label='Close Price', color='blue')
+        ax1.set_title(f'{self.ticker} Price with Fractal Key Levels')
+        ax1.set_ylabel('Price')
+        ax1.grid(True, alpha=0.3)
+        
+        # Add key levels as horizontal lines
+        if show_key_levels and self.key_levels is not None and len(self.key_levels) > 0:
+            for idx, level in self.key_levels.iterrows():
+                line_width = min(5, 1 + level['Strength'] / 2)
+                alpha = min(0.8, 0.4 + level['Strength'] / 10)
+                ax1.axhline(y=level['Price'], linestyle='--', 
+                           color='red', alpha=alpha, linewidth=line_width)
+                
+                # Add label with price
+                ax1.text(self.data.index[-1], level['Price'], 
+                        f" ${level['Price']:.2f}", va='center', ha='left',
+                        color='white', bbox=dict(facecolor='red', alpha=0.7))
+        
+        # Plot fractal dimension
+        ax2.plot(self.data.index, self.data['FractalDimension'], label='Fractal Dimension', color='green')
+        ax2.set_xlabel('Date')
+        ax2.set_ylabel('Fractal Dimension')
+        ax2.grid(True, alpha=0.3)
+        
+        # Mark key level points
+        if 'IsKeyLevel' in self.data.columns:
+            key_points = self.data[self.data['IsKeyLevel']]
+            ax2.scatter(key_points.index, key_points['FractalDimension'], 
+                       color='red', marker='o', s=50, alpha=0.7, label='Key Level Points')
+        
+        # Add legend
+        ax1.legend(loc='upper left')
+        ax2.legend(loc='upper left')
+        
+        # Create a custom legend for key level strength
+        if show_key_levels and self.key_levels is not None and len(self.key_levels) > 0:
+            legend_elements = [
+                Line2D([0], [0], color='red', lw=1, linestyle='--', alpha=0.4, label='Weak Level'),
+                Line2D([0], [0], color='red', lw=2, linestyle='--', alpha=0.6, label='Medium Level'),
+                Line2D([0], [0], color='red', lw=4, linestyle='--', alpha=0.8, label='Strong Level')
+            ]
+            ax1.legend(handles=legend_elements, loc='upper right')
+            
+        plt.tight_layout()
+        plt.savefig(f"{self.ticker}_fractal_key_levels.png")
+        plt.show()
+        
+    def get_current_key_levels(self, proximity_to_current=10):
+        """
+        Get key levels near the current price
+        
+        Args:
+            proximity_to_current (float): Percentage proximity to current price to filter levels
+            
+        Returns:
+            DataFrame of key levels near current price with support/resistance labels
+        """
+        if self.key_levels is None or len(self.key_levels) == 0:
+            return pd.DataFrame()
+            
+        current_price = self.data['Close'].iloc[-1]
+        
+        # Calculate percentage difference from current price
+        self.key_levels['PercentFromCurrent'] = abs(
+            (self.key_levels['Price'] - current_price) / current_price * 100
+        )
+        
+        # Filter levels by proximity
+        nearby_levels = self.key_levels[self.key_levels['PercentFromCurrent'] <= proximity_to_current].copy()
+        
+        # Label as support or resistance
+        nearby_levels['Type'] = ['Resistance' if level > current_price else 'Support' 
+                              for level in nearby_levels['Price']]
+        
+        # Sort by proximity to current price
+        nearby_levels = nearby_levels.sort_values('PercentFromCurrent')
+        
+        # Format for display
+        result = nearby_levels[['Price', 'Type', 'Strength', 'PercentFromCurrent']]
+        result = result.rename(columns={'PercentFromCurrent': 'DistancePercent'})
+        
+        return result
+
+# Example usage
+if __name__ == "__main__":
+    # Change ticker and parameters as needed
+    ticker = "SPY" # Example ticker
+    analyzer = MandelbrotFractalLevels(ticker, period="1y", interval="1d")
+    
+    # Run analysis
+    key_levels = analyzer.analyze()
+    
+    # Debug detected key levels
+    print("\nAll Detected Key Levels:")
+    print(key_levels)
+    
+    # Plot results
+    analyzer.plot_results()
+    
+    # Get current nearby key levels
+    current_levels = analyzer.get_current_key_levels(proximity_to_current=10)
+    print("\nKey Levels Near Current Price:")
+    print(current_levels)
+
+    # Ensure current price is a scalar value
+    current_price = float(analyzer.data['Close'].iloc[-1])
+    print(f"\nCurrent Price: ${current_price:.2f}")
+
+    # Bonus: Quick trade setup based on key levels
+    print("\nPotential Trade Setups:")
+
+    # Check if current_levels is empty
+    if current_levels.empty:
+        print("No key levels detected near the current price.")
+    else:
+        # Find closest support and resistance
+        supports = current_levels[current_levels['Type'] == 'Support']
+        resistances = current_levels[current_levels['Type'] == 'Resistance']
+        
+        if not supports.empty:
+            closest_support = supports.iloc[0]
+            print(f"Support: ${closest_support['Price']:.2f} (Strength: {closest_support['Strength']:.2f})")
+            
+        if not resistances.empty:
+            closest_resistance = resistances.iloc[0]
+            print(f"Resistance: ${closest_resistance['Price']:.2f} (Strength: {closest_resistance['Strength']:.2f})")
+            
+        # Calculate risk/reward if both support and resistance exist
+        if not supports.empty and not resistances.empty:
+            risk = current_price - closest_support['Price']
+            reward = closest_resistance['Price'] - current_price
+            rr_ratio = reward / risk if risk > 0 else 0
+            
+            print(f"Risk/Reward Ratio: {rr_ratio:.2f}")
+            if rr_ratio >= 2:
+                print("✅ Favorable R/R ratio (>= 2)")
+            else:
+                print("⚠️ Unfavorable R/R ratio (< 2)")

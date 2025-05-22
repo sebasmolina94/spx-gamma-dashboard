@@ -1,0 +1,38 @@
+
+        ===============================================
+        OPTIONS ANALYSIS REPORT FOR SPY
+        ===============================================
+        
+        Report Date: 2025-04-01 23:38:42
+        Current Stock Price: $560.97
+        Options Expiration: 2025-04-02
+        
+        --- IV WALLS ---
+        Call IV Walls: 12 walls found (threshold: 0.05)
+        Wall Strikes: $450.00, $455.00, $500.00, $505.00, $518.00, $525.00, $533.00, $534.00, $605.00, $620.00, $640.00, $650.00
+        
+        Put IV Walls: 24 walls found (threshold: 0.05)
+        Wall Strikes: $405.00, $410.00, $415.00, $420.00, $425.00, $430.00, $435.00, $440.00, $445.00, $450.00, $455.00, $460.00, $470.00, $475.00, $485.00, $505.00, $515.00, $579.00, $580.00, $581.00, $600.00, $605.00, $630.00, $645.00
+        
+        --- OPTIONS METRICS ---
+        Volume-weighted Call IV: nan
+        Volume-weighted Put IV: nan
+        ATM Call IV: 0.2941
+        ATM Put IV: 0.2872
+        IV Skew (Put - Call): nan
+        Put/Call Volume Ratio: 1.16
+        Put/Call Open Interest Ratio: 1.50
+        
+        --- KEY LEVELS ---
+        Top Call Strikes by Volume: $560.00, $561.00, $565.00, $558.00, $562.00
+        Top Put Strikes by Volume: $560.00, $555.00, $550.00, $558.00, $557.00
+        Top Call Strikes by OI: $568.00, $570.00, $569.00, $586.00, $560.00
+        Top Put Strikes by OI: $550.00, $540.00, $539.00, $545.00, $530.00
+        
+        --- TRADING INSIGHTS ---
+        - High put volume at $560.00 may indicate a support level or downside target
+- Call IV walls may represent key resistance levels worth monitoring
+- Put IV walls may represent key support levels worth monitoring
+        
+        ===============================================
+        
